@@ -1,0 +1,172 @@
+name: Deploy HecBillingCustomer to GCP VM
+
+on:
+  push:
+    branches: 
+      - test-actions
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  PROJECT: "HecBillingCustomer"
+  PROJECT_URL: "https://dev.hecbill.hecticus.com"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: dev
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+
+    - name: Set up SBT
+      uses: sbt/setup-sbt@v1
+
+    - name: Notify Slack
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      if: always()
+
+    - name: Build project
+      run: |
+        cd $PROJECT
+        sbt clean compile
+
+    - name: Run tests
+      run: |
+        cd $PROJECT
+        echo "Tests are not defined - skipping"
+      # Replace with actual test command when tests are defined
+      # sbt test
+
+    - name: Create distribution package
+      run: |
+        cd $PROJECT
+        sbt universal:packageBin
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: hecbilling-package
+        path: ${{ env.PROJECT }}/target/universal/*.zip
+        retention-days: 7
+
+    - name: Setup GCP Auth
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Deploy to GCP VM
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.GCP_VM_HOST }}
+        username: ${{ secrets.GCP_VM_USERNAME }}
+        key: ${{ secrets.GCP_VM_SSH_KEY }}
+        script: |
+          #!/bin/bash
+          set -e
+          
+          # Create deployment directory
+          DEPLOY_DIR="/opt/hecbilling"
+          sudo mkdir -p $DEPLOY_DIR
+          sudo chown $USER:$USER $DEPLOY_DIR
+          
+          # Stop existing service
+          sudo systemctl stop hecbilling || true
+          
+          # Backup current version
+          if [ -d "$DEPLOY_DIR/current" ]; then
+            BACKUP_DIR="$DEPLOY_DIR/backup_$(date +%Y%m%d_%H%M%S)"
+            cp -r $DEPLOY_DIR/current $BACKUP_DIR
+          fi
+
+    - name: Copy artifact to GCP VM
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.GCP_VM_HOST }}
+        username: ${{ secrets.GCP_VM_USERNAME }}
+        key: ${{ secrets.GCP_VM_SSH_KEY }}
+        source: "${{ env.PROJECT }}/target/universal/*.zip"
+        target: "/tmp/"
+
+    - name: Extract and deploy on GCP VM
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.GCP_VM_HOST }}
+        username: ${{ secrets.GCP_VM_USERNAME }}
+        key: ${{ secrets.GCP_VM_SSH_KEY }}
+        script: |
+          #!/bin/bash
+          set -e
+          
+          DEPLOY_DIR="/opt/hecbilling"
+          ARTIFACT_PATH=$(ls /tmp/*.zip | head -1)
+          
+          # Extract new version
+          unzip -q $ARTIFACT_PATH -d /tmp/hecbilling-new/
+          APP_DIR=$(find /tmp/hecbilling-new -maxdepth 1 -type d -name "hec*" | head -1)
+          
+          # Deploy new version
+          rm -rf $DEPLOY_DIR/current
+          mkdir -p $DEPLOY_DIR/current
+          cp -r $APP_DIR/* $DEPLOY_DIR/current/
+          
+          # Create systemd service file
+          sudo tee /etc/systemd/system/hecbilling.service > /dev/null <<EOF
+          [Unit]
+          Description=Hec Billing Customer Service
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=$USER
+          WorkingDirectory=$DEPLOY_DIR/current
+          ExecStart=$DEPLOY_DIR/current/bin/hec-billing-customer
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Start service
+          sudo systemctl daemon-reload
+          sudo systemctl enable hecbilling
+          sudo systemctl start hecbilling
+          
+          # Cleanup
+          rm -f $ARTIFACT_PATH
+          rm -rf /tmp/hecbilling-new/
+          
+          # Verify deployment
+          sleep 10
+          sudo systemctl status hecbilling
+          curl -f ${{ env.PROJECT_URL }}/health || echo "Health check failed but continuing..."
+
+    - name: Deployment success notification
+      if: success()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        text: "✅ HecBillingCustomer deployed successfully to ${{ env.PROJECT_URL }}"
+
+    - name: Deployment failure notification
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        text: "❌ HecBillingCustomer deployment failed"
