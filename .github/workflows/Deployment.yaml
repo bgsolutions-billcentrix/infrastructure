@@ -82,52 +82,52 @@ jobs:
             exit 1
         fi
 
-- name: Deploy to GCP VM
-  run: |
-    gcloud compute ssh ${{ secrets.GCP_VM_NAME }} \
-      --zone ${{ secrets.GCP_VM_ZONE }} \
-      --project ${{ secrets.GCP_PROJECT_ID }} \
-      --command='
-      #!/bin/bash
-      set -e
+    - name: Deploy to GCP VM
+      run: |
+        gcloud compute ssh ${{ secrets.GCP_VM_NAME }} \
+          --zone ${{ secrets.GCP_VM_ZONE }} \
+          --project ${{ secrets.GCP_PROJECT_ID }} \
+          --command='
+          #!/bin/bash
+          set -e
 
-      # Configuration
-      DEPLOY_DIR="/opt/hecbillingcustomer"
-      APP_DIR="/opt/hecbillingcustomer"
-      SERVICE_NAME="hecbillingcustomer"
+          # Configuration
+          DEPLOY_DIR="/opt/hecbillingcustomer"
+          APP_DIR="/opt/hecbillingcustomer"
+          SERVICE_NAME="hecbillingcustomer"
 
-      echo "Starting deployment process..."
+          echo "Starting deployment process..."
 
-      # Stop existing service
-      echo "Stopping existing service: $SERVICE_NAME"
-      sudo systemctl stop $SERVICE_NAME || true
+          # Stop existing service
+          echo "Stopping existing service: $SERVICE_NAME"
+          sudo systemctl stop $SERVICE_NAME || true
 
-      # Backup current version
-      if [ -d "$DEPLOY_DIR/current" ]; then
-        BACKUP_DIR="$DEPLOY_DIR/backup_$(date +%Y%m%d_%H%M%S)"
-        echo "Creating backup: $BACKUP_DIR"
-        cp -r "$DEPLOY_DIR/current" "$BACKUP_DIR"
-      else
-        echo "No existing deployment found for backup"
-      fi
+          # Backup current version
+          if [ -d "$DEPLOY_DIR/current" ]; then
+            BACKUP_DIR="$DEPLOY_DIR/backup_$(date +%Y%m%d_%H%M%S)"
+            echo "Creating backup: $BACKUP_DIR"
+            cp -r "$DEPLOY_DIR/current" "$BACKUP_DIR"
+          else
+           echo "No existing deployment found for backup"
+          fi
 
-      # Update application code
-      echo "Updating application code from Git..."
-      cd "$APP_DIR"
-      git pull origin main
+          # Update application code
+          echo "Updating application code from Git..."
+          cd "$APP_DIR"
+          git pull origin main
 
-      # Additional build steps
-      sbt universal:packageBin
-      unzip -o target/universal/*.zip -d "$DEPLOY_DIR/"
+          # Additional build steps
+          sbt universal:packageBin
+          unzip -o target/universal/*.zip -d "$DEPLOY_DIR/"
 
-      # Restart service
-      echo "Restarting service: $SERVICE_NAME"
-      sudo systemctl restart "$SERVICE_NAME"
+          # Restart service
+          echo "Restarting service: $SERVICE_NAME"
+          sudo systemctl restart "$SERVICE_NAME"
 
-      # Verify deployment
-      echo "Verifying deployment..."
-      sleep 5
-      sudo systemctl status "$SERVICE_NAME"
+          # Verify deployment
+          echo "Verifying deployment..."
+          sleep 5
+          sudo systemctl status "$SERVICE_NAME"
 
-      echo "✅ Deployment completed successfully!"
-      '
+          echo "✅ Deployment completed successfully!"
+          '
