@@ -76,9 +76,10 @@ jobs:
           fi
           
           # Get service account email
-          SERVICE_ACCOUNT_EMAIL=$(echo '${{ secrets.GCP_SA_KEY }}' | jq -r '.client_email')
-          echo "Service Account: $SERVICE_ACCOUNT_EMAIL"
-          
+          SERVICE_ACCOUNT_EMAIL=$(echo '${{ secrets.SERVICE_ACCOUNT_EMAIL }}')
+          #SERVICE_ACCOUNT_EMAIL=$(echo '${{ secrets.GCP_SA_KEY }}' | jq -r '.client_email')
+          #echo "Service Account: $SERVICE_ACCOUNT_EMAIL" 
+         
           # Get VM external IP
           VM_IP=$(gcloud compute instances describe ${{ env.GCP_VM_NAME }} \
             --zone=${{ env.GCP_VM_ZONE }} \
@@ -88,9 +89,11 @@ jobs:
       - name: Deploy to GCP VM
         run: |
           # Get service account email and format for OS Login
-          SERVICE_ACCOUNT_EMAIL=$(echo '${{ secrets.GCP_SA_KEY }}' | jq -r '.client_email')
-          OS_LOGIN_USER="sa_$(echo $SERVICE_ACCOUNT_EMAIL | tr '@' '_' | tr '.' '_')"
+          #SERVICE_ACCOUNT_EMAIL=$(echo '${{ secrets.GCP_SA_KEY }}' | jq -r '.client_email')
+          #OS_LOGIN_USER="$(echo $SERVICE_ACCOUNT_EMAIL | tr '@' '_' | tr '.' '_')"
+          OS_LOGIN_USER="$(echo '{{ secrets.SERVICE_ACCOUNT_EMAIL }}' | tr '@' '_' | tr '.' '_')"
           
+
           echo "Using OS Login user: $OS_LOGIN_USER"
           
           # Get VM external IP
