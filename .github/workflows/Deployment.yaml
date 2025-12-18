@@ -17,11 +17,7 @@ jobs:
     steps:
       - name: Set GCP env vars
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "GCP_PROJECT_ID=hecbilling-203521" >> $GITHUB_ENV
-            echo "GCP_VM_ZONE=us-east1-b" >> $GITHUB_ENV
-            echo "GCP_VM_NAME=customer-portal-app" >> $GITHUB_ENV
-          elif [[ "$GITHUB_REF_NAME" == "test-actions" ]]; then
+          if [[ "$GITHUB_REF_NAME" == "main" || "$GITHUB_REF_NAME" == "test-actions" ]]; then
             echo "GCP_PROJECT_ID=hecbilling-203521" >> $GITHUB_ENV
             echo "GCP_VM_ZONE=us-east1-b" >> $GITHUB_ENV
             echo "GCP_VM_NAME=customer-portal-app" >> $GITHUB_ENV
@@ -52,19 +48,10 @@ jobs:
           cd "$PROJECT"
           sbt universal:packageBin
 
-      - name: Upload build artifacts (hecbillingcustomer)
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: hecbillingcustomer-package
-          path: ${{ env.PROJECT }}/target/universal/*.zip
-          retention-days: 7
-
-      # (si el segundo upload es realmente necesario, mantenlo;
-      # si no, puedes borrarlo para evitar duplicados)
-      - name: Upload build artifacts (hecbilling)
-        uses: actions/upload-artifact@v4
-        with:
-          name: hecbilling-package
           path: ${{ env.PROJECT }}/target/universal/*.zip
           retention-days: 7
 
@@ -72,16 +59,53 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
+          export_environment_variables: true
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          export_default_credentials: false
+
+      - name: Configure SSH for OS Login
+        run: |
+          # Generate SSH key if not exists
+          mkdir -p ~/.ssh
+          if [ ! -f ~/.ssh/google_compute_engine ]; then
+            ssh-keygen -t rsa -f ~/.ssh/google_compute_engine -q -N ""
+          fi
+          
+          # Get service account email
+          SERVICE_ACCOUNT_EMAIL=$(echo '${{ secrets.GCP_SA_KEY }}' | jq -r '.client_email')
+          echo "Service Account: $SERVICE_ACCOUNT_EMAIL"
+          
+          # Get VM external IP
+          VM_IP=$(gcloud compute instances describe ${{ env.GCP_VM_NAME }} \
+            --zone=${{ env.GCP_VM_ZONE }} \
+            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+          echo "VM IP: $VM_IP"
 
       - name: Deploy to GCP VM
         run: |
-          gcloud compute ssh "$GCP_VM_NAME" \
-            --zone "$GCP_VM_ZONE" \
-            --project "$GCP_PROJECT_ID" \
-            --command='
+          # Get service account email and format for OS Login
+          SERVICE_ACCOUNT_EMAIL=$(echo '${{ secrets.GCP_SA_KEY }}' | jq -r '.client_email')
+          OS_LOGIN_USER="sa_$(echo $SERVICE_ACCOUNT_EMAIL | tr '@' '_' | tr '.' '_')"
+          
+          echo "Using OS Login user: $OS_LOGIN_USER"
+          
+          # Get VM external IP
+          VM_IP=$(gcloud compute instances describe ${{ env.GCP_VM_NAME }} \
+            --zone=${{ env.GCP_VM_ZONE }} \
+            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+          
+          # SSH using OS Login with deployment commands
+          ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -i ~/.ssh/google_compute_engine \
+              $OS_LOGIN_USER@$VM_IP << 'EOF'
             #!/bin/bash
             set -e
-
+            
             # Configuration
             DEPLOY_DIR="/opt/hecbillingcustomer"
             APP_DIR="/opt/hecbillingcustomer"
@@ -108,8 +132,29 @@ jobs:
             git pull origin main
 
             # Additional build steps
+            echo "Building application with SBT..."
             sbt universal:packageBin
-            unzip -o target/universal/*.zip -d "$DEPLOY_DIR/"
+            
+            echo "Extracting distribution package..."
+            # Find the latest zip file
+            LATEST_ZIP=$(ls -t target/universal/*.zip | head -1)
+            if [ -n "$LATEST_ZIP" ]; then
+              echo "Found package: $LATEST_ZIP"
+              # Clean previous deployment
+              sudo rm -rf "$DEPLOY_DIR/current" || true
+              # Extract new version
+              unzip -o "$LATEST_ZIP" -d "$DEPLOY_DIR/"
+              # Create symlink or rename
+              EXTRACTED_DIR=$(basename "$LATEST_ZIP" .zip)
+              mv "$DEPLOY_DIR/$EXTRACTED_DIR" "$DEPLOY_DIR/current"
+            else
+              echo "Error: No zip file found in target/universal/"
+              exit 1
+            fi
+
+            # Set proper permissions
+            sudo chown -R root:root "$DEPLOY_DIR/current"
+            sudo chmod -R 755 "$DEPLOY_DIR/current/bin"
 
             # Restart service
             echo "Restarting service: $SERVICE_NAME"
@@ -118,8 +163,7 @@ jobs:
             # Verify deployment
             echo "Verifying deployment..."
             sleep 5
-            sudo systemctl status "$SERVICE_NAME"
+            sudo systemctl status "$SERVICE_NAME" --no-pager
 
             echo "✅ Deployment completed successfully!"
-            '
-
+          EOF
